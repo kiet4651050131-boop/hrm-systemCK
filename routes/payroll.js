@@ -2,6 +2,7 @@ const router = require('express').Router();
 const { db, audit, recordHistory, notifyUser } = require('../db');
 const { auth, need } = require('../middleware');
 const L = require('../lib');
+const { notifyWorkflowEmail } = require('../mailer');
 
 router.use(auth);
 
@@ -175,12 +176,22 @@ router.post('/periods/:id/lock', HR, (req, res) => {
   if (!p) return res.status(404).json({ error: 'Không tìm thấy kỳ lương' });
   if (p.status === 'Đã chốt') return res.status(400).json({ error: 'Kỳ lương đã được chốt' });
   if (!db.prepare('SELECT 1 FROM payslips WHERE period_id = ?').get(p.id)) return res.status(400).json({ error: 'Chưa có phiếu lương, hãy bấm Tính lương trước' });
-  db.prepare("UPDATE payroll_periods SET status = 'Đã chốt', locked_at = datetime('now','localtime') WHERE id = ?").run(p.id);
-  db.prepare(`SELECT DISTINCT u.id, s.employee_name FROM payslips s
+  const locked = db.transaction(() => {
+    const result = db.prepare("UPDATE payroll_periods SET status = 'Đã chốt', locked_at = datetime('now','localtime') WHERE id = ? AND status = 'Nháp'").run(p.id);
+    return result.changes === 1 && L.isPayrollLocked(p.month);
+  })();
+  if (!locked) return res.status(409).json({ error: 'Kỳ lương đã được thay đổi, vui lòng tải lại và thử lại' });
+  const employees = db.prepare(`SELECT DISTINCT u.id, u.email FROM payslips s
     JOIN employees e ON e.id = s.employee_id JOIN users u ON u.email = e.email WHERE s.period_id = ?`)
-    .all(p.id).forEach((employee) => {
-      notifyUser(employee.id, 'Phiếu lương đã sẵn sàng', `Phiếu lương tháng ${p.month} đã được chốt.`, '/pay');
-    });
+    .all(p.id);
+  employees.forEach((employee) => {
+    notifyUser(employee.id, 'Phiếu lương đã sẵn sàng', `Phiếu lương tháng ${p.month} đã được chốt.`, '/pay');
+  });
+  notifyWorkflowEmail(
+    employees.map((employee) => employee.email),
+    'Phiếu lương đã sẵn sàng',
+    `Phiếu lương tháng ${p.month} đã được chốt. Đăng nhập hệ thống để xem phiếu lương.`,
+  );
   audit(req.user, `Chốt kỳ lương ${p.month}`);
   res.json({ ok: true });
 });
@@ -203,11 +214,7 @@ router.delete('/periods/:id', HR, (req, res) => {
 });
 
 // Xuất CSV (mở được bằng Excel, có BOM để không lỗi tiếng Việt)
-const cell = (v) => {
-  let s = String(v == null ? '' : v);
-  if (/^[=+\-@]/.test(s) && Number.isNaN(Number(s))) s = `'${s}`; // chống chèn công thức khi mở bằng Excel
-  return /[",\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-};
+const cell = L.csvCell;
 router.get('/periods/:id/export', HR, (req, res) => {
   const p = period(req.params.id);
   if (!p) return res.status(404).json({ error: 'Không tìm thấy kỳ lương' });

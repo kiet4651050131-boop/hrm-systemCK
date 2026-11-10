@@ -20,6 +20,11 @@ router.get('/', (req, res) => {
       WHERE ${active} GROUP BY d.id ORDER BY count DESC`).all(...s.args);
     out.by_status = db.prepare(`SELECT e.status name, COUNT(*) count FROM employees e WHERE 1=1${s.sql} GROUP BY e.status ORDER BY count DESC`).all(...s.args);
     out.present_today = db.prepare(`SELECT COUNT(*) c FROM attendances a JOIN employees e ON e.id = a.employee_id WHERE a.date = ? AND a.check_in IS NOT NULL AND ${active}`).get(t, ...s.args).c;
+    out.late_today = db.prepare(`SELECT COUNT(*) c FROM attendances a JOIN employees e ON e.id = a.employee_id
+      WHERE a.date = ? AND a.check_in > ? AND ${active} AND NOT EXISTS (
+        SELECT 1 FROM leave_requests r WHERE r.employee_id = e.id AND r.status = 'Đã duyệt' AND r.half = 0
+          AND r.from_date <= ? AND r.to_date >= ?
+      )`).get(t, L.getSettings().work_start, ...s.args, t, t).c;
     out.on_leave_today = db.prepare(`SELECT COUNT(DISTINCT r.employee_id) c FROM leave_requests r JOIN employees e ON e.id = r.employee_id
       WHERE r.status = 'Đã duyệt' AND r.from_date <= ? AND r.to_date >= ? AND ${active}`).get(t, t, ...s.args).c;
     const d30 = L.fmtDate(new Date(Date.now() - 30 * 86400000));

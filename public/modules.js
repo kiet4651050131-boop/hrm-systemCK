@@ -4,10 +4,20 @@ var fmt = function (n) { return Number(n || 0).toLocaleString('vi-VN'); };
 var thisMonth = function () { var d = new Date(); return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2); };
 var DOW = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
 var dmy = function (s) { return s ? s.slice(8) + '/' + s.slice(5, 7) : ''; };
-var attM = thisMonth(), attEmp = null, lvS = '', payTab = 'periods', payOpen = null, payMonth = '', slips = [];
+var attM = thisMonth(), attEmp = null, attQ = '', attDept = '', attPage = 1, lvS = '', leaveQ = '', leaveMonth = '', leaveDept = '', leavePage = 1,
+  otQ = '', otMonth = '', otDept = '', otPage = 1, empPage = 1, payTab = 'periods', payOpen = null, payMonth = '', slips = [];
 
-function resetViews() { attEmp = null; lvS = ''; payOpen = null; }
+function resetViews() { attEmp = null; payOpen = null; }
 function kpi(label, val, sub, icon) { return '<div class="kpi"><span class="ki">' + ico(icon || 'doc') + '</span><div class="v">' + val + '</div><small>' + label + '</small>' + (sub ? '<small>' + sub + '</small>' : '') + '</div>'; }
+function doughnutChart(data,total){
+ var colors=['var(--ok)','var(--wa)','var(--pri)','var(--bd)'],sum=data.reduce(function(s,x){return s+x.value},0),at=0;
+ var stops=data.map(function(item,i){var start=at;at+=sum?item.value/sum*100:0;return colors[i]+' '+start+'% '+at+'%'}).join(',');
+ return '<div class="donut-wrap"><div class="donut" role="img" aria-label="Tình hình chấm công hôm nay" style="background:'+(sum?'conic-gradient('+stops+')':'var(--bd)')+'"><div class="donut-center">'+total+'<small>nhân sự</small></div></div><div class="donut-legend">'+data.map(function(item,i){return '<span><i class="legend-dot" style="background:'+colors[i]+'"></i>'+esc(item.name)+'<b>'+item.value+'</b></span>'}).join('')+'</div></div>';
+}
+function payrollColumns(data){
+ var max=Math.max.apply(null,data.map(function(item){return Number(item.net)||0}).concat([1]));
+ return '<div class="columns" role="img" aria-label="Biến động quỹ lương thực nhận">'+data.map(function(item){var value=Number(item.net)||0;return '<div class="column" title="'+esc(item.month)+': '+fmt(value)+'"><b>'+fmt(value)+'</b><i style="height:'+Math.max(3,Math.round(value/max*100))+'%"></i><span>'+esc(item.month.slice(5))+'</span></div>'}).join('')+'</div>';
+}
 function stTag(s) {
   var c = { 'Đã duyệt': 't-ok', 'Chờ quản lý': 't-wa', 'Chờ HR': 't-wa', 'Từ chối': 't-bad', 'Đã hủy': 't-off', 'Đã chốt': 't-ok', 'Nháp': 't-wa' }[s];
   return '<span class="tag ' + (c || '') + '">' + esc(s) + '</span>';
@@ -22,6 +32,9 @@ function bars(list, fmtVal) {
 /* ================= TỔNG QUAN ================= */
 async function vDash() {
   var d = await api('/dashboard'), h = '';
+  var supplemental = me.role === 'employee'
+    ? await api('/attendance/month?month=' + thisMonth())
+    : await Promise.all([api('/leave'), api('/overtime')]);
   var now = new Date(), hr = now.getHours();
   var hello = hr < 11 ? 'Chào buổi sáng' : hr < 14 ? 'Chào buổi trưa' : hr < 18 ? 'Chào buổi chiều' : 'Chào buổi tối';
   var dowName = ['Chủ nhật', 'Thứ hai', 'Thứ ba', 'Thứ tư', 'Thứ năm', 'Thứ sáu', 'Thứ bảy'][now.getDay()];
@@ -34,7 +47,7 @@ async function vDash() {
       (!t.check_in ? '<button class="btn acc" onclick="doCheck(\'check-in\')">Check-in</button>'
         : !t.check_out ? '<button class="btn acc" onclick="doCheck(\'check-out\')">Check-out</button>' : '<span class="tag t-ok">Đã xong hôm nay</span>') + '</div>';
   }
-  h += '<div class="hero"><div><h1>' + hello + ', ' + esc(me.name.trim().split(/\s+/).pop()) + '</h1><p>' + esc(sub) + '</p>' + (chk || '') + '</div>' + scene() + '</div>';
+  h += '<div class="hero"><div><h1>' + hello + ', ' + esc(me.name.trim().split(/\s+/).pop()) + '</h1><p>' + esc(sub) + '</p>' + (chk || '') + '</div></div>';
   var k = '';
   if (d.headcount !== undefined) {
     k += kpi('Nhân sự', d.headcount, '', 'people') + kpi('Đi làm hôm nay', d.present_today, '', 'check') + kpi('Nghỉ phép hôm nay', d.on_leave_today, '', 'leave') + kpi('Mới vào 30 ngày', d.new_hires_30d, '', 'spark');
@@ -42,24 +55,60 @@ async function vDash() {
   if (d.pending_for_me !== undefined) k += kpi('Đơn chờ tôi duyệt', d.pending_for_me, '', 'doc');
   if (d.my_leave) k += kpi('Phép năm còn lại', d.my_leave.remaining, 'đã dùng ' + d.my_leave.used + ' / ' + d.my_leave.quota, 'leave') + kpi('Đơn của tôi đang chờ', d.my_pending, '', 'hourglass');
   if (k) h += '<div class="kpis">' + k + '</div>';
+  if(me.role==='employee'&&d.my_leave){
+    var monthSummary=supplemental[0]||{}, credited=Number(monthSummary.present||0)+Number(monthSummary.paid_leave||0), standard=Number(monthSummary.std_days||0);
+    var progress=standard?Math.min(100,Math.round(credited/standard*100)):0;
+    h+='<div class="dash-grid"><section class="dash-panel"><h2>Chấm công tháng '+thisMonth()+'</h2>'+
+      '<div class="mut">'+credited+' / '+standard+' ngày công được ghi nhận</div><div class="dash-progress"><i style="width:'+progress+'%"></i></div>'+
+      '<div class="dash-stats"><div class="dash-stat"><b>'+Number(monthSummary.present||0)+'</b><small>Ngày đi làm</small></div>'+
+      '<div class="dash-stat"><b>'+Number(monthSummary.paid_leave||0)+'</b><small>Nghỉ có lương</small></div>'+
+      '<div class="dash-stat"><b>'+Number(monthSummary.absent||0)+'</b><small>Ngày vắng</small></div></div></section>'+
+      '<section class="dash-panel"><h2>Lối tắt</h2><div class="dash-shortcuts">'+
+      '<button class="dash-shortcut" onclick="go(&quot;att&quot;)">'+ico('clock')+'Bảng công</button>'+
+      '<button class="dash-shortcut" onclick="go(&quot;leave&quot;)">'+ico('leave')+'Đơn nghỉ phép</button>'+
+      '<button class="dash-shortcut" onclick="go(&quot;overtime&quot;)">'+ico('clock')+'Đề nghị tăng ca</button>'+
+      '<button class="dash-shortcut" onclick="go(&quot;pay&quot;)">'+ico('pay')+'Phiếu lương</button></div></section></div>';
+  }else if(me.role!=='employee'){
+    var pendingLeave=supplemental[0].filter(function(row){return row.can_decide}).map(function(row){return{type:'Nghỉ phép',name:row.name,description:row.from_date+(row.to_date!==row.from_date?' → '+row.to_date:''),href:'leave',date:row.from_date}});
+    var pendingOvertime=supplemental[1].filter(function(row){return row.can_decide}).map(function(row){return{type:'Tăng ca',name:row.name,description:row.date+' · '+row.hours+' giờ',href:'overtime',date:row.date}});
+    var pendingRows=pendingLeave.concat(pendingOvertime).sort(function(a,b){return a.date.localeCompare(b.date)}).slice(0,5);
+    var pendingCount=pendingLeave.length+pendingOvertime.length;
+    h+='<div class="dash-grid"><section class="dash-panel"><h2>Cần bạn xử lý <span class="mut">('+pendingCount+(pendingCount>=500?'+':'')+')</span></h2>'+
+      (pendingRows.length?'<div class="dash-list">'+pendingRows.map(function(row){return'<div class="dash-row"><div class="dash-row-main"><b>'+esc(row.type)+' · '+esc(row.name)+'</b><small>'+esc(row.description)+'</small></div><button class="btn g s" onclick="go(&quot;'+row.href+'&quot;)">Mở</button></div>'}).join('')+'</div>':'<p class="mut">Hiện không có đơn nghỉ hoặc tăng ca cần bạn duyệt.</p>')+
+      '</section><section class="dash-panel"><h2>Truy cập nhanh</h2><div class="dash-shortcuts">'+
+      '<button class="dash-shortcut" onclick="go(&quot;att&quot;)">'+ico('clock')+'Bảng chấm công</button>'+
+      '<button class="dash-shortcut" onclick="go(&quot;leave&quot;)">'+ico('leave')+'Đơn nghỉ phép</button>'+
+      '<button class="dash-shortcut" onclick="go(&quot;overtime&quot;)">'+ico('clock')+'Đơn tăng ca</button>'+
+      '<button class="dash-shortcut" onclick="go(&quot;emps&quot;)">'+ico('people')+'Hồ sơ nhân viên</button></div></section></div>';
+  }
   if (d.by_department && d.by_department.length) {
     h += '<div class="grid"><div class="card"><h2>Nhân sự theo phòng ban</h2>' + bars(d.by_department.map(function (x) { return { n: x.name, v: x.count }; })) + '</div>' +
       '<div class="card"><h2>Theo trạng thái</h2>' + bars(d.by_status.map(function (x) { return { n: x.name, v: x.count }; })) + '</div></div>';
   }
+  if(d.headcount!==undefined){
+    var late=Number(d.late_today||0),present=Number(d.present_today||0),leave=Number(d.on_leave_today||0);
+    var onTime=Math.max(0,present-late),notRecorded=Math.max(0,Number(d.headcount)-onTime-late-leave);
+    h+='<div class="card"><h2>Tình hình chấm công hôm nay</h2>'+doughnutChart([
+      {name:'Đi làm đúng giờ',value:onTime},{name:'Đi muộn',value:late},{name:'Nghỉ phép',value:leave},{name:'Chưa ghi nhận',value:notRecorded}
+    ],d.headcount)+'</div>';
+  }
   if (d.payroll_trend && d.payroll_trend.length) {
-    h += '<div class="card"><h2>Quỹ lương thực nhận (các kỳ đã chốt)</h2>' + bars(d.payroll_trend.map(function (x) { return { n: x.month, v: x.net }; }), fmt) + '</div>';
+    h += '<div class="card"><h2>Quỹ lương thực nhận (các kỳ đã chốt)</h2>' + payrollColumns(d.payroll_trend) + '</div>';
   }
   $('v').innerHTML = h || '<p class="mut">Chưa có dữ liệu.</p>';
 }
-async function doCheck(k) { try { await api('/attendance/' + k, 'POST'); render(); } catch (e) { fail(e); } }
+async function doCheck(k) { try { await api('/attendance/' + k, 'POST'); toast(k==='check-in'?'Đã check-in thành công':'Đã check-out thành công','success'); render(); } catch (e) { fail(e); } }
 
 /* ================= CHẤM CÔNG ================= */
 async function vAtt() {
-  var h = '<div class="bar"><input type="month" style="width:auto;flex:none" value="' + attM + '" onchange="if(this.value){attM=this.value;attEmp=null;render()}">' +
+  var h = '<div class="bar"><input type="month" style="width:auto;flex:none" value="' + attM + '" onchange="if(this.value){attM=this.value;attEmp=null;attPage=1;render()}">' +
+    (!attEmp ? '<input id="attSearch" placeholder="Tìm tên, mã nhân viên hoặc phòng ban..." value="' + esc(attQ) + '" oninput="filterRender(\'attSearch\',\'attQ\',\'attPage\')">' : '') +
+    (!attEmp&&me.role!=='employee'?'<select style="width:auto" onchange="attDept=this.value;attPage=1;render()"><option value="">Tất cả phòng ban</option>'+depts.map(function(d){return '<option value="'+d.id+'"'+(String(d.id)===attDept?' selected':'')+'>'+esc(d.name)+'</option>'}).join('')+'</select>':'')+
+    '<button class="btn g" onclick="downloadCsv(\'/attendance/export?month=' + attM + (attDept?'&department_id='+encodeURIComponent(attDept):'') + '\').catch(fail)">Xuất CSV</button>' +
     (mng() ? '<button class="btn g" onclick="attImp()">Import file chấm công</button>' : '') + '</div>';
   var l = [];
   if (!attEmp) {
-    l = await api('/attendance/month?month=' + attM);
+    l = await api('/attendance/month?month=' + attM + (attDept?'&department_id='+encodeURIComponent(attDept):''));
     if (me.role === 'employee' && l.length === 1) attEmp = l[0].employee_id;
   }
   if (attEmp) {
@@ -75,11 +124,16 @@ async function vAtt() {
           (mng() ? '<button class="btn g s" onclick="attEdit(' + r.employee.id + ',\'' + x.date + '\',\'' + (x.check_in || '') + '\',\'' + (x.check_out || '') + '\')">Sửa</button>' : '') + '</td></tr>';
       }).join('') + '</table></div></div>';
   } else {
+    var filtered = l.filter(function (row) {
+      var query = attQ.trim().toLocaleLowerCase('vi');
+      return !query || [row.name, row.code, row.department].some(function (value) { return String(value || '').toLocaleLowerCase('vi').indexOf(query) >= 0; });
+    });
+    var page = pageData(filtered, attPage, 12);attPage=page.page;
     h += '<div class="card tw"><table><tr><th>Mã</th><th>Họ tên</th><th>Phòng ban</th><th>Công chuẩn</th><th>Đi làm</th><th>Nghỉ phép</th><th>Nghỉ KL</th><th>Vắng</th><th>Đi muộn</th><th></th></tr>' +
-      l.map(function (x) {
+      page.items.map(function (x) {
         return '<tr><td class="mut">' + esc(x.code) + '</td><td><div class="who">' + avatar(x.name) + '<b>' + esc(x.name) + '</b></div></td><td>' + esc(x.department || '-') + '</td><td>' + x.std_days + '</td><td>' + x.present + '</td><td>' + x.paid_leave + '</td><td>' + x.unpaid_leave + '</td><td>' +
           (x.absent ? '<span class="tag t-bad">' + x.absent + '</span>' : 0) + '</td><td>' + x.late + '</td><td><button class="btn g s" onclick="attEmp=' + x.employee_id + ';render()">Chi tiết</button></td></tr>';
-      }).join('') + (l.length ? '' : '<tr><td colspan="10" class="empty">Tháng này chưa có dữ liệu chấm công.</td></tr>') + '</table></div>' +
+      }).join('') + (filtered.length ? '' : '<tr><td colspan="10" class="empty">Không tìm thấy nhân viên phù hợp với bộ lọc.</td></tr>') + '</table>' + pageBar(page.page,page.count,page.total,'attendance') + '</div>' +
       '<p class="mut">Quy ước: đi làm từ 4 giờ trở lên = 1 công, dưới 4 giờ = 0,5 công. Ngày hôm nay chưa tính vắng.</p>';
   }
   $('v').innerHTML = h;
@@ -104,19 +158,29 @@ async function vLeave() {
   if (bal) {
     h += '<div class="kpis">' + kpi('Phép năm ' + bal.year, bal.quota, 'tổng số ngày', 'logs') + kpi('Đã nghỉ', bal.used, '', 'sun') + kpi('Đang chờ duyệt', bal.pending, '', 'hourglass') + kpi('Còn lại', bal.remaining, '', 'leave') + '</div>';
   }
-  h += '<div class="bar"><select style="width:auto" onchange="lvS=this.value;render()"><option value="">Tất cả trạng thái</option>' +
+  h += '<div class="bar"><input id="leaveSearch" placeholder="Tìm tên hoặc mã nhân viên..." value="' + esc(leaveQ) + '" oninput="filterRender(\'leaveSearch\',\'leaveQ\',\'leavePage\')">' +
+    '<input type="month" style="width:auto;flex:none" value="' + esc(leaveMonth) + '" onchange="leaveMonth=this.value;leavePage=1;render()">' +
+    (me.role==='employee'?'':'<select style="width:auto" onchange="leaveDept=this.value;leavePage=1;render()"><option value="">Tất cả phòng ban</option>'+depts.map(function(d){return '<option value="'+d.id+'"'+(String(d.id)===leaveDept?' selected':'')+'>'+esc(d.name)+'</option>'}).join('')+'</select>') +
+    '<select style="width:auto" onchange="lvS=this.value;leavePage=1;render()"><option value="">Tất cả trạng thái</option>' +
     ['Chờ quản lý', 'Chờ HR', 'Đã duyệt', 'Từ chối', 'Đã hủy'].map(function (s) { return '<option' + (s === lvS ? ' selected' : '') + '>' + s + '</option>'; }).join('') + '</select>' +
     '<span class="sp"></span><button class="btn" onclick="lvNew()">+ Tạo đơn nghỉ</button></div>';
   window._types = types;
   var showWho = me.role !== 'employee';
+  var filtered=list.filter(function(row){
+    var query=leaveQ.trim().toLocaleLowerCase('vi');
+    var matchesQuery=!query||[row.name,row.code].some(function(value){return String(value||'').toLocaleLowerCase('vi').indexOf(query)>=0});
+    var matchesMonth=!leaveMonth||(row.from_date<=leaveMonth+'-31'&&row.to_date>=leaveMonth+'-01');
+    return matchesQuery&&matchesMonth&&(!leaveDept||String(row.department_id)===leaveDept);
+  });
+  var page=pageData(filtered,leavePage,10);leavePage=page.page;
   h += '<div class="card tw"><table><tr>' + (showWho ? '<th>Nhân viên</th>' : '') + '<th>Loại</th><th>Thời gian</th><th>Số ngày</th><th>Lý do</th><th>Trạng thái</th><th></th></tr>' +
-    list.map(function (r) {
+    page.items.map(function (r) {
       return '<tr>' + (showWho ? '<td><div class="who">' + avatar(r.name) + '<div><b>' + esc(r.name) + '</b><span class="mut">' + esc(r.department || '') + '</span></div></div></td>' : '') + '<td>' + esc(r.type) + '</td><td style="white-space:nowrap">' +
         dmy(r.from_date) + (r.to_date !== r.from_date ? ' → ' + dmy(r.to_date) : '') + '/' + r.from_date.slice(0, 4) + (r.half ? ' (nửa ngày)' : '') + '</td><td>' + r.days + '</td><td>' + esc(r.reason) +
         (r.manager_note ? '<div class="mut">Phản hồi: ' + esc(r.manager_note) + '</div>' : '') + '</td><td>' + stTag(r.status) + '</td><td style="white-space:nowrap">' +
         (r.can_decide ? '<button class="btn s" onclick="lvOk(' + r.id + ')">Duyệt</button> <button class="btn r s" onclick="lvNo(' + r.id + ')">Từ chối</button> ' : '') +
         (r.can_cancel ? '<button class="btn g s" onclick="lvCancel(' + r.id + ')">Hủy đơn</button>' : '') + '</td></tr>';
-    }).join('') + (list.length ? '' : '<tr><td colspan="7" class="empty">Chưa có đơn nghỉ nào. Bấm "Tạo đơn nghỉ" khi cần nghỉ.</td></tr>') + '</table></div>' +
+    }).join('') + (filtered.length ? '' : '<tr><td colspan="7" class="empty">Không tìm thấy đơn nghỉ phù hợp với bộ lọc.</td></tr>') + '</table>' + pageBar(page.page,page.count,page.total,'leave') + '</div>' +
     '<p class="mut">Luồng duyệt: Nhân viên gửi đơn → Quản lý phòng ban duyệt → HR xác nhận. Nghỉ phép năm chỉ tính ngày làm việc (không tính cuối tuần, ngày lễ).</p>';
   $('v').innerHTML = h;
 }
@@ -126,11 +190,11 @@ function lvNew() {
     await api('/leave', 'POST', { type_id: +v.type_id, from_date: v.from_date, to_date: v.to_date || v.from_date, half: v.half === '1', reason: v.reason });
   }, '', 'Gửi đơn');
 }
-async function lvOk(id) { try { await api('/leave/' + id + '/decide', 'PUT', { action: 'approve' }); render(); } catch (e) { fail(e); } }
+async function lvOk(id) { try { await api('/leave/' + id + '/decide', 'PUT', { action: 'approve' }); toast('Đã chuyển đơn sang bước tiếp theo','success'); render(); } catch (e) { fail(e); } }
 function lvNo(id) {
   modal('Từ chối đơn nghỉ', [['note', 'Lý do từ chối', 'area']], {}, async function (v) { await api('/leave/' + id + '/decide', 'PUT', { action: 'reject', note: v.note }); }, '', 'Từ chối');
 }
-async function lvCancel(id) { if (!confirm('Hủy đơn nghỉ này?')) return; try { await api('/leave/' + id + '/cancel', 'PUT'); render(); } catch (e) { fail(e); } }
+function lvCancel(id) { modal('Hủy đơn nghỉ',[],{},async function(){await api('/leave/'+id+'/cancel','PUT')},'<p>Bạn có chắc muốn hủy đơn nghỉ này không?</p>','Hủy đơn'); }
 
 /* ================= LƯƠNG ================= */
 async function vPay() {
@@ -226,7 +290,7 @@ function printSlip(i) {
 function payNew() {
   var m = $('np_m').value;
   if (!m) return;
-  api('/payroll/periods', 'POST', { month: m }).then(render).catch(fail);
+  api('/payroll/periods', 'POST', { month: m }).then(function(){toast('Đã tạo kỳ lương','success');render()}).catch(fail);
 }
 async function payCalc(id) {
   try {
@@ -238,9 +302,9 @@ async function payCalc(id) {
     modal('Kết quả tính lương', [], {}, async function () { }, html, 'Xong');
   } catch (e) { fail(e); }
 }
-async function payLock(id) { if (!confirm('Chốt kỳ lương? Sau khi chốt nhân viên sẽ xem được phiếu lương và không thể tính lại.')) return; try { await api('/payroll/periods/' + id + '/lock', 'POST'); render(); } catch (e) { fail(e); } }
-async function payUnlock(id) { if (!confirm('Mở khóa kỳ lương để tính lại? Nhân viên sẽ không xem được phiếu cho đến khi chốt lại.')) return; try { await api('/payroll/periods/' + id + '/unlock', 'POST'); render(); } catch (e) { fail(e); } }
-async function payDel(id) { if (!confirm('Xóa kỳ lương nháp này?')) return; try { await api('/payroll/periods/' + id, 'DELETE'); render(); } catch (e) { fail(e); } }
+function payLock(id) { modal('Chốt kỳ lương',[],{},async function(){await api('/payroll/periods/'+id+'/lock','POST')},'<p>Sau khi chốt, nhân viên có thể xem phiếu lương và dữ liệu trong kỳ sẽ bị khóa.</p>','Chốt kỳ'); }
+function payUnlock(id) { modal('Mở khóa kỳ lương',[],{},async function(){await api('/payroll/periods/'+id+'/unlock','POST')},'<p>Nhân viên sẽ không xem được phiếu cho đến khi kỳ lương được chốt lại.</p>','Mở khóa'); }
+function payDel(id) { modal('Xóa kỳ lương nháp',[],{},async function(){await api('/payroll/periods/'+id,'DELETE')},'<p>Thao tác này sẽ xóa kỳ lương nháp. Bạn có chắc muốn tiếp tục?</p>','Xóa kỳ'); }
 async function payCsv(id, month) {
   try {
     var r = await fetch('/api/payroll/periods/' + id + '/export', { headers: { Authorization: 'Bearer ' + TOKEN } });
@@ -298,7 +362,7 @@ async function vCfg() {
 async function cfgSave() {
   var o = {};
   CFG.forEach(function (sec) { sec[1].forEach(function (f) { o[f[0]] = $('c_' + f[0]).value; }); });
-  try { await api('/settings', 'PUT', o); $('cfgmsg').innerHTML = '<div class="okm">Đã lưu cấu hình</div>'; }
+  try { await api('/settings', 'PUT', o); $('cfgmsg').innerHTML = '<div class="okm">Đã lưu cấu hình</div>'; toast('Đã lưu cấu hình','success'); }
   catch (e) { if (e.message !== '401') $('cfgmsg').innerHTML = '<div class="err">' + esc(e.message) + '</div>'; }
 }
 async function holAdd() {
@@ -309,17 +373,27 @@ async function holDel(d) { try { await api('/holidays/' + d, 'DELETE'); render()
 /* ================= TĂNG CA ================= */
 async function vOvertime() {
   var list = await api('/overtime');
-  var h = '<div class="bar"><button class="btn" onclick="otNew()">+ Gửi đề nghị tăng ca</button></div>' +
+  var h = '<div class="bar"><input id="otSearch" placeholder="Tìm tên hoặc mã nhân viên..." value="' + esc(otQ) + '" oninput="filterRender(\'otSearch\',\'otQ\',\'otPage\')">' +
+    '<input type="month" style="width:auto;flex:none" value="' + esc(otMonth) + '" onchange="otMonth=this.value;otPage=1;render()">' +
+    (me.role==='employee'?'':'<select style="width:auto" onchange="otDept=this.value;otPage=1;render()"><option value="">Tất cả phòng ban</option>'+depts.map(function(d){return '<option value="'+d.id+'"'+(String(d.id)===otDept?' selected':'')+'>'+esc(d.name)+'</option>'}).join('')+'</select>') +
+    '<span class="sp"></span><button class="btn" onclick="otNew()">+ Gửi đề nghị tăng ca</button></div>';
+  var filtered=list.filter(function(row){
+    var query=otQ.trim().toLocaleLowerCase('vi');
+    return (!query||[row.name,row.code].some(function(value){return String(value||'').toLocaleLowerCase('vi').indexOf(query)>=0}))
+      &&(!otMonth||row.date.indexOf(otMonth+'-')===0)&&(!otDept||String(row.department_id)===otDept);
+  });
+  var page=pageData(filtered,otPage,10);otPage=page.page;
+  h +=
     '<div class="card tw"><table><tr>' + (me.role === 'employee' ? '' : '<th>Nhân viên</th>') +
     '<th>Ngày</th><th>Số giờ</th><th>Lý do</th><th>Trạng thái</th><th>Phản hồi</th><th></th></tr>' +
-    list.map(function (row) {
+    page.items.map(function (row) {
       return '<tr>' + (me.role === 'employee' ? '' : '<td><div class="who">' + avatar(row.name) + '<div><b>' + esc(row.name) + '</b><span class="mut">' + esc(row.department || '') + '</span></div></div></td>') +
         '<td>' + dmy(row.date) + '/' + row.date.slice(0, 4) + '</td><td>' + row.hours + ' giờ</td><td>' + esc(row.reason) + '</td><td>' + stTag(row.status) +
         '</td><td>' + esc(row.manager_note || '') + (row.decided_by ? '<div class="mut">' + esc(row.decided_by) + '</div>' : '') + '</td><td style="white-space:nowrap">' +
         (row.can_decide ? '<button class="btn s" onclick="otDecide(' + row.id + ',\'approve\')">Duyệt</button> <button class="btn r s" onclick="otDecide(' + row.id + ',\'reject\')">Từ chối</button>' : '') +
         (row.can_cancel ? '<button class="btn g s" onclick="otCancel(' + row.id + ')">Hủy</button>' : '') + '</td></tr>';
-    }).join('') + (list.length ? '' : '<tr><td colspan="7" class="empty">Chưa có đề nghị tăng ca. Gửi đề nghị trước khi làm thêm giờ để quản lý xác nhận.</td></tr>') +
-    '</table></div><p class="mut">Quy trình: nhân viên gửi đề nghị → quản lý phòng ban duyệt → HR xác nhận. Chỉ giờ đã được HR duyệt mới được đưa vào kỳ lương.</p>';
+    }).join('') + (filtered.length ? '' : '<tr><td colspan="7" class="empty">Không tìm thấy đề nghị tăng ca phù hợp với bộ lọc.</td></tr>') +
+    '</table>' + pageBar(page.page,page.count,page.total,'overtime') + '</div><p class="mut">Quy trình: nhân viên gửi đề nghị → quản lý phòng ban duyệt → HR xác nhận. Chỉ giờ đã được HR duyệt mới được đưa vào kỳ lương.</p>';
   $('v').innerHTML = h;
 }
 function otNew() {
@@ -328,14 +402,13 @@ function otNew() {
   }, '<p class="mut">Đề nghị sẽ cần quản lý và HR xác nhận trước khi được tính lương.</p>', 'Gửi đề nghị');
 }
 async function otDecide(id, action) {
-  var note = '';
-  if (action === 'reject') note = prompt('Lý do từ chối (không bắt buộc):') || '';
-  try { await api('/overtime/' + id + '/decide', 'PUT', { action: action, note: note }); render(); } catch (e) { fail(e); }
+  if(action==='reject'){
+    modal('Từ chối đề nghị tăng ca',[['note','Lý do từ chối (không bắt buộc)','area']],{},async function(value){await api('/overtime/'+id+'/decide','PUT',{action:action,note:value.note})},'','Từ chối');
+    return;
+  }
+  try { await api('/overtime/' + id + '/decide', 'PUT', { action: action, note: '' }); toast('Đã chuyển đề nghị sang bước tiếp theo','success'); render(); } catch (e) { fail(e); }
 }
-async function otCancel(id) {
-  if (!confirm('Hủy đề nghị tăng ca này?')) return;
-  try { await api('/overtime/' + id + '/cancel', 'PUT'); render(); } catch (e) { fail(e); }
-}
+function otCancel(id) { modal('Hủy đề nghị tăng ca',[],{},async function(){await api('/overtime/'+id+'/cancel','PUT')},'<p>Bạn có chắc muốn hủy đề nghị tăng ca này không?</p>','Hủy đề nghị'); }
 
 /* ================= BÁO CÁO ================= */
 var reportMonth = thisMonth(), reportDept = '';

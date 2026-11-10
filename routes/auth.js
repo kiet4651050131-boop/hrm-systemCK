@@ -1,10 +1,10 @@
 const router = require('express').Router();
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const { db, audit } = require('../db');
 const { sign, auth, wrap, EMAIL_RE } = require('../middleware');
 const L = require('../lib');
+const { getMailConfig, sendEmail, escapeHtml } = require('../mailer');
 
 // Giới hạn đăng nhập sai: 10 lần / 15 phút cho mỗi IP + email
 const fails = new Map();
@@ -34,35 +34,6 @@ function takeResetRequest(ip) {
   return true;
 }
 
-function resetMailConfig() {
-  const port = Number(process.env.SMTP_PORT || 587);
-  const secure = process.env.SMTP_SECURE === 'true' || port === 465;
-  const appUrl = String(process.env.APP_URL || '').replace(/\/+$/, '');
-  if (!process.env.SMTP_HOST || !process.env.SMTP_FROM || !appUrl
-    || !Number.isInteger(port) || port < 1 || port > 65535) return null;
-  let url;
-  try { url = new URL(appUrl); } catch { return null; }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return null;
-  const localHost = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && localHost)) return null;
-  return {
-    host: process.env.SMTP_HOST,
-    port,
-    secure,
-    from: process.env.SMTP_FROM,
-    appUrl,
-    auth: process.env.SMTP_USER && process.env.SMTP_PASS
-      ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-      : undefined,
-  };
-}
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[char]);
-}
-
 // Giao diện hỏi để biết có hiện nút "Đăng ký" không: chỉ mở khi hệ thống chưa có tài khoản nào
 router.get('/status', (req, res) => res.json({ registrationOpen: usersCount() === 0 }));
 
@@ -70,7 +41,7 @@ router.post('/forgot-password', wrap(async (req, res) => {
   if (!takeResetRequest(req.ip)) {
     return res.status(429).json({ error: 'Bạn đã yêu cầu quá nhiều lần, vui lòng thử lại sau 15 phút' });
   }
-  const config = resetMailConfig();
+  const config = getMailConfig();
   if (!config) return res.status(503).json({ error: 'Chức năng email khôi phục chưa được cấu hình đầy đủ' });
 
   const email = String((req.body || {}).email || '').trim().toLowerCase();
@@ -87,18 +58,8 @@ router.post('/forgot-password', wrap(async (req, res) => {
     .run(tokenHash, user.id, expiresAt);
 
   const link = `${config.appUrl}/?reset=${token}`;
-  const transporter = nodemailer.createTransport({
-    host: config.host,
-    port: config.port,
-    secure: config.secure,
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 15000,
-    ...(config.auth ? { auth: config.auth } : {}),
-  });
   try {
-    await transporter.sendMail({
-      from: config.from,
+    await sendEmail(config, {
       to: user.email,
       subject: 'Khôi phục mật khẩu HRM',
       text: `Xin chào ${user.name},\n\nĐể đặt lại mật khẩu, mở liên kết sau trong vòng 30 phút:\n${link}\n\nNếu bạn không yêu cầu, hãy bỏ qua email này.`,

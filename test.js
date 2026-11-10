@@ -1,9 +1,13 @@
 // Kiem thu nhanh toan bo API (dung CSDL tam trong bo nho): npm test
 process.env.DB_FILE = ':memory:';
 process.env.JWT_SECRET = 'test-secret-test-secret-test-secret-123';
+for (const key of ['SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM', 'APP_URL']) {
+  process.env[key] = '';
+}
 const assert = require('assert');
 const net = require('node:net');
 const app = require('./server');
+const L = require('./lib');
 
 (async () => {
   const srv = app.listen(0);
@@ -20,6 +24,7 @@ const app = require('./server');
     return result.d.token;
   };
   let n = 0; const ok = (c, m) => { assert(c, m); n++; };
+  ok(L.csvCell('=1+1') === "'=1+1", 'CSV escape cong thuc spreadsheet');
 
   // Dang ky tu do chi mo cho tai khoan Admin dau tien; sau do Admin/HR tao tai khoan
   ok((await call('GET', '/auth/status')).d.registrationOpen === true, 'chua co tai khoan: cho phep tao Admin dau tien');
@@ -76,6 +81,8 @@ const app = require('./server');
   ok((await call('GET', '/users', null, U1)).s === 403, 'employee khong xem tai khoan');
   ok((await call('GET', '/logs', null, U1)).s === 403, 'employee khong xem nhat ky');
   ok((await call('POST', '/employees', { code: 'X', name: 'X', email: 'x@x.vn' }, U1)).s === 403, 'employee khong them');
+  ok((await call('POST', '/employees', { code: 'BADPHONE', name: 'Test', email: 'badphone@cty.vn', phone: '123' }, A)).s === 400, 'tu choi SDT khong hop le');
+  ok((await call('POST', '/employees', { code: 'BADDATE', name: 'Test', email: 'baddate@cty.vn', start_date: '2026-02-31' }, A)).s === 400, 'tu choi ngay vao lam khong hop le');
 
   // Co cau to chuc
   const dept = (await call('POST', '/departments', { name: 'Ke toan' }, A)).d;
@@ -93,9 +100,10 @@ const app = require('./server');
   ok((await call('GET', '/employees?department_id=' + dept.id, null, A)).d.length === 1, 'loc phong ban');
 
   // Nhan vien chi sua SDT cua minh
-  ok((await call('PUT', '/employees/' + mine[0].id, { phone: '0901', name: 'Hack', status: 'Chính thức' }, U1)).s === 200);
+  ok((await call('PUT', '/employees/' + mine[0].id, { phone: '0901234567', name: 'Hack', status: 'Chính thức' }, U1)).s === 200);
   const after = (await call('GET', '/employees', null, U1)).d[0];
-  ok(after.phone === '0901' && after.name === 'An' && after.status === 'Chờ cập nhật', 'chi doi duoc SDT');
+  ok(after.phone === '0901234567' && after.name === 'An' && after.status === 'Chờ cập nhật', 'chi doi duoc SDT');
+  ok((await call('PUT', '/employees/' + mine[0].id, { phone: '123' }, U1)).s === 400, 'tu choi SDT khong hop le');
   ok((await call('PUT', '/employees/' + add.d.id, { phone: '1' }, U1)).s === 404, 'khong sua ho so nguoi khac');
 
   // Import CSV
@@ -170,10 +178,26 @@ const app = require('./server');
   rows.push('NV999,2026-09-01,08:00,17:00', 'NV200,2026-09-01,xx,17:00');
   const impAtt = (await call('POST', '/attendance/import', { csv: 'ma,ngay,vao,ra\n' + rows.join('\n') }, A)).d;
   ok(impAtt.imported === 19 + 21 && impAtt.errors.length === 2, 'import cham cong bao loi tung dong');
+  const empCsvResponse = await fetch(`${base}/employees/export`, { headers: { Authorization: 'Bearer ' + A } });
+  const empCsv = await empCsvResponse.text();
+  ok(empCsvResponse.status === 200 && empCsv.includes('NV200') && empCsv.includes('Mã nhân viên'), 'xuất CSV danh sách nhân viên');
+  ok((await fetch(`${base}/employees/export`, { headers: { Authorization: 'Bearer ' + U1 } })).status === 403, 'nhân viên không xuất danh sách người khác');
+  const managerCsv = await (await fetch(`${base}/employees/export`, { headers: { Authorization: 'Bearer ' + U2 } })).text();
+  ok(managerCsv.includes(mine[0].code) && !managerCsv.includes('NV200'), 'CSV quản lý chỉ gồm nhân viên trong phạm vi phòng ban');
+  const attCsvResponse = await fetch(`${base}/attendance/export?month=2026-09`, { headers: { Authorization: 'Bearer ' + A } });
+  const attCsv = await attCsvResponse.text();
+  ok(attCsvResponse.status === 200 && attCsv.includes('2026-09-01') && attCsv.includes('NV200'), 'xuất CSV chấm công theo tháng');
   const sum = (await call('GET', `/attendance/month/${mine[0].id}?month=2026-09`, null, A)).d.summary;
   ok(sum.std_days === 21 && sum.present === 19 && sum.paid_leave === 1 && sum.absent === 1 && sum.late === 0, 'tong hop bang cong cua An');
+  const departmentAttendance = await call('GET', `/attendance/month?month=2026-09&department_id=${dept.id}`, null, U2);
+  ok(departmentAttendance.s === 200 && departmentAttendance.d.length > 0 && departmentAttendance.d.every((row) => row.department === 'Ke toan'), 'lọc bảng công theo phòng ban mà vẫn giữ phạm vi quản lý');
+  ok((await call('GET', `/attendance/month?month=2026-09&department_id=99999`, null, A)).s === 400, 'phòng ban lọc bảng công không hợp lệ bị từ chối');
   const dungId = (await call('GET', '/employees?q=NV200', null, A)).d[0].id;
   ok((await call('GET', `/attendance/month/${dungId}?month=2026-09`, null, A)).d.summary.late === 0, 'Dung 08:10 khong tre');
+  const lockedLeave = await call('POST', '/leave', { type_id: annual, from_date: '2026-09-10', to_date: '2026-09-10', reason: 'Chờ duyệt' }, U1);
+  ok(lockedLeave.s === 201, 'tạo trước đơn nghỉ chờ duyệt');
+  const lockedOvertime = await call('POST', '/overtime', { date: '2026-09-11', hours: 2, reason: 'Chờ duyệt' }, U1);
+  ok(lockedOvertime.s === 201, 'tạo trước đề nghị tăng ca chờ duyệt');
 
   ok((await call('PUT', `/payroll/salary/${mine[0].id}`, { base_salary: 20000000 }, U1)).s === 403, 'nhan vien khong dat luong');
   ok((await call('PUT', `/payroll/salary/${mine[0].id}`, { base_salary: -5 }, A)).s === 400, 'luong am');
@@ -194,6 +218,14 @@ const app = require('./server');
   // Dung: du cong, 40tr; BH 4.200.000; tinh thue 40-4,2-15,5 = 20,3tr -> 5% x 10tr + 10% x 10,3tr = 1.530.000
   ok(sDung.gross === 40000000 && sDung.taxable === 20300000 && sDung.tax === 1530000 && sDung.net === 34270000, 'phieu luong Dung (thue luy tien)');
   ok((await call('POST', `/payroll/periods/${per.d.id}/lock`, null, A)).s === 200, 'chot ky luong');
+  ok((await call('PUT', '/attendance', { employee_id: mine[0].id, date: '2026-09-07', check_in: '09:00', check_out: '17:00' }, A)).s === 409, 'khóa sửa công thuộc kỳ đã chốt');
+  ok((await call('POST', '/attendance/import', { csv: `ma,ngay,vao,ra\n${anCode},2026-09-07,09:00,17:00` }, A)).d.errors.length === 1, 'khóa import công thuộc kỳ đã chốt');
+  ok((await call('POST', '/leave', { type_id: annual, from_date: '2026-09-14', to_date: '2026-09-14' }, U1)).s === 409, 'khóa tạo đơn nghỉ thuộc kỳ đã chốt');
+  ok((await call('PUT', `/leave/${lockedLeave.d.id}/decide`, { action: 'approve' }, U2)).s === 409, 'khóa duyệt đơn nghỉ thuộc kỳ đã chốt');
+  ok((await call('PUT', `/leave/${lockedLeave.d.id}/cancel`, null, U1)).s === 409, 'khóa hủy đơn nghỉ thuộc kỳ đã chốt');
+  ok((await call('POST', '/overtime', { date: '2026-09-14', hours: 2, reason: 'Tháng đã chốt' }, U1)).s === 409, 'khóa tạo tăng ca thuộc kỳ đã chốt');
+  ok((await call('PUT', `/overtime/${lockedOvertime.d.id}/decide`, { action: 'approve' }, U2)).s === 409, 'khóa duyệt tăng ca thuộc kỳ đã chốt');
+  ok((await call('PUT', `/overtime/${lockedOvertime.d.id}/cancel`, null, U1)).s === 409, 'khóa hủy tăng ca thuộc kỳ đã chốt');
   ok((await call('POST', `/payroll/periods/${per.d.id}/calculate`, null, A)).s === 400, 'ky da chot khong tinh lai');
   ok((await call('DELETE', `/payroll/periods/${per.d.id}`, null, A)).s === 400, 'ky da chot khong xoa');
   ok((await call('POST', `/payroll/periods/${per.d.id}/unlock`, null, U2)).s === 403, 'chi admin mo khoa');
@@ -255,10 +287,10 @@ const app = require('./server');
 
   // ===== Dashboard =====
   const dA = (await call('GET', '/dashboard', null, A)).d;
-  ok(dA.headcount >= 4 && dA.by_department.length > 0 && dA.payroll_trend.length === 1, 'dashboard HR');
+  ok(dA.headcount >= 4 && dA.by_department.length > 0 && dA.payroll_trend.length === 1 && Number.isInteger(dA.late_today), 'dashboard HR có số liệu biểu đồ');
   const dU = (await call('GET', '/dashboard', null, U1)).d;
   ok(dU.headcount === undefined && dU.payroll_trend === undefined && dU.my_today.check_in && dU.my_leave.quota === 12, 'dashboard nhan vien chi thay du lieu cua minh');
-  ok((await call('GET', '/dashboard', null, U2)).d.pending_for_me === 0, 'dashboard quan ly');
+  ok((await call('GET', '/dashboard', null, U2)).d.pending_for_me === 1, 'dashboard quan ly dem don nghi cho duyet');
 
   // ===== Tăng ca, lịch sử, báo cáo, thông báo =====
   ok((await call('POST', '/overtime', { date: '2026-10-05', hours: 2, reason: 'Chốt tiến độ' }, U1)).s === 201, 'nhân viên gửi đề nghị tăng ca');
@@ -361,6 +393,36 @@ const app = require('./server');
     ok((await call('POST', '/auth/reset-password', { token: resetToken[1], password: 'anotherpass123' })).s === 400, 'token reset chi dung mot lan');
     const resetWithNewPassword = await call('POST', '/auth/login', { email: 'an@cty.vn', password: 'emailreset123' });
     ok(resetWithNewPassword.s === 200 && resetWithNewPassword.d.user.must_change_password === 0, 'dang nhap duoc voi mat khau moi qua email');
+    const waitForMessages = async (count) => {
+      for (let attempt = 0; attempt < 100 && messages.length < count; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return messages.length >= count;
+    };
+    let expectedMessages = messages.length;
+    const emailLeave = await call('POST', '/leave', { type_id: annual, from_date: '2027-07-12', to_date: '2027-07-12' }, U1);
+    ok(emailLeave.s === 201 && await waitForMessages(++expectedMessages), 'email gui cho quan ly khi tao don nghi');
+    ok((await call('PUT', `/leave/${emailLeave.d.id}/decide`, { action: 'approve' }, U2)).d.status === 'Chờ HR', 'quản lý chuyển đơn nghỉ tới HR');
+    ok(await waitForMessages(++expectedMessages), 'email gui HR khi don nghi qua quan ly');
+    ok((await call('PUT', `/leave/${emailLeave.d.id}/decide`, { action: 'approve' }, A)).d.status === 'Đã duyệt', 'HR duyet don nghi');
+    ok(await waitForMessages(++expectedMessages), 'email ket qua don nghi gui cho nhan vien');
+    const emailOvertime = await call('POST', '/overtime', { date: '2027-08-03', hours: 2, reason: 'Kiểm thử email' }, U1);
+    ok(emailOvertime.s === 201 && await waitForMessages(++expectedMessages), 'email gui cho quan ly khi tao don tang ca');
+    ok((await call('PUT', `/overtime/${emailOvertime.d.id}/decide`, { action: 'approve' }, U2)).d.status === 'Chờ HR', 'quản lý chuyển tăng ca tới HR');
+    ok(await waitForMessages(++expectedMessages), 'email gui HR khi tang ca qua quan ly');
+    ok((await call('PUT', `/overtime/${emailOvertime.d.id}/decide`, { action: 'approve' }, A)).d.status === 'Đã duyệt', 'HR duyet tang ca');
+    ok(await waitForMessages(++expectedMessages), 'email ket qua tang ca gui cho nhan vien');
+    const emailPeriod = (await call('POST', '/payroll/periods', { month: '2027-09' }, A)).d;
+    await call('POST', `/payroll/periods/${emailPeriod.id}/calculate`, null, A);
+    const emailSlips = (await call('GET', `/payroll/periods/${emailPeriod.id}/payslips`, null, A)).d.payslips;
+    ok(emailSlips.length > 0 && (await call('POST', `/payroll/periods/${emailPeriod.id}/lock`, null, A)).s === 200, 'chot ky luong de gui email phieu luong');
+    const employeeEmails = (await call('GET', '/employees', null, A)).d;
+    const registeredEmails = (await call('GET', '/users', null, A)).d.map((user) => user.email);
+    expectedMessages += emailSlips.filter((slip) => {
+      const employee = employeeEmails.find((item) => item.code === slip.employee_code);
+      return employee && registeredEmails.includes(employee.email);
+    }).length;
+    ok(await waitForMessages(expectedMessages), 'email thong bao phieu luong gui toi nhan vien co phieu');
   } finally {
     for (const [key, value] of Object.entries(oldMailEnv)) {
       if (value === undefined) delete process.env[key];

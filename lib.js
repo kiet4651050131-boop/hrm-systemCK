@@ -11,6 +11,16 @@ const validDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s)) && fmtDate(parseD
 const validTime = (s) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s));
 const validMonth = (s) => /^\d{4}-(0[1-9]|1[0-2])$/.test(String(s));
 const curMonth = () => today().slice(0, 7);
+const isPayrollLocked = (month) => !!db.prepare("SELECT 1 FROM payroll_periods WHERE month = ? AND status = 'Đã chốt'").get(month);
+const hasLockedPayrollInRange = (from, to) => !!db.prepare(`
+  SELECT 1 FROM payroll_periods
+  WHERE status = 'Đã chốt' AND month BETWEEN substr(?,1,7) AND substr(?,1,7)
+  LIMIT 1
+`).get(from, to);
+const isOnApprovedFullDayLeave = (employeeId, date) => !!db.prepare(`
+  SELECT 1 FROM leave_requests
+  WHERE employee_id = ? AND status = 'Đã duyệt' AND half = 0 AND from_date <= ? AND to_date >= ?
+`).get(employeeId, date, date);
 const monthRange = (m) => {
   const [y, mo] = m.split('-').map(Number);
   return { from: `${m}-01`, to: `${m}-${pad(new Date(y, mo, 0).getDate())}` };
@@ -23,6 +33,11 @@ function eachDay(from, to) {
 const toMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 const hoursBetween = (a, b) => (a && b ? (toMin(b) - toMin(a)) / 60 : null);
 const round2 = (n) => Math.round(n * 100) / 100;
+const csvCell = (value) => {
+  let text = String(value == null ? '' : value);
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  return /[",\n;]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
 
 /* ---------- Cấu hình, ngày lễ, ngày làm việc ---------- */
 function getSettings() {
@@ -176,5 +191,7 @@ function calcPayslip(sal, sm, st, adj = {}, overtime = {}) {
 
 module.exports = {
   today, nowHM, fmtDate, parseD, validDate, validTime, validMonth, curMonth, monthRange, eachDay, workdays, holidays, isWorkday,
+  isPayrollLocked, hasLockedPayrollInRange, isOnApprovedFullDayLeave,
+  csvCell,
   getSettings, nextEmployeeCode, isHr, meEmp, scopeSql, canSeeEmp, summarize, parseBrackets, calcTax, calcPayslip, hoursBetween, round2,
 };

@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const { db, audit, recordHistory } = require('../db');
 const { auth, need, EMAIL_RE } = require('../middleware');
+const L = require('../lib');
 
 router.use(auth);
 
@@ -11,6 +12,12 @@ const STATUSES = ['Thử việc', 'Chính thức', 'Nghỉ việc', 'Chờ cập
 
 const isMng = (u) => u.role === 'admin' || u.role === 'hr';
 const me = (u) => db.prepare('SELECT * FROM employees WHERE email = ?').get(u.email);
+const validPhone = (value) => {
+  const phone = String(value || '').trim();
+  if (!phone) return true;
+  const digits = phone.replace(/\D/g, '');
+  return /^[+()\d.\-\s]+$/.test(phone) && digits.length >= 7 && digits.length <= 15;
+};
 
 // Phạm vi xem: nhân viên = chỉ mình; quản lý = cùng phòng ban + mình; HR/Admin = tất cả
 function scopeSql(u) {
@@ -25,6 +32,35 @@ function canSee(u, id) {
   const s = scopeSql(u);
   return db.prepare(`${SELECT} WHERE e.id = ?${s.sql}`).get(id, ...s.args);
 }
+
+router.get('/export', (req, res) => {
+  if (req.user.role === 'employee') return res.status(403).json({ error: 'Bạn không đủ quyền xuất danh sách nhân viên' });
+  const scope = scopeSql(req.user);
+  let sql = `${SELECT} WHERE 1=1${scope.sql}`;
+  const args = [...scope.args];
+  if (req.query.department_id) {
+    const departmentId = Number(req.query.department_id);
+    if (!Number.isInteger(departmentId) || !db.prepare('SELECT 1 FROM departments WHERE id = ?').get(departmentId)) {
+      return res.status(400).json({ error: 'Phòng ban không hợp lệ' });
+    }
+    sql += ' AND e.department_id = ?';
+    args.push(departmentId);
+  }
+  const employees = db.prepare(sql + ' ORDER BY e.code').all(...args);
+  const rows = [
+    ['Mã nhân viên', 'Họ tên', 'Email', 'Số điện thoại', 'Phòng ban', 'Chức danh', 'Trạng thái', 'Ngày vào làm'],
+    ...employees.map((employee) => [
+      employee.code, employee.name, employee.email, employee.phone, employee.department,
+      employee.position, employee.status, employee.start_date,
+    ]),
+  ];
+  audit(req.user, `Xuất danh sách nhân viên: ${employees.length}`);
+  res.set({
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': 'attachment; filename="danh-sach-nhan-vien.csv"',
+  });
+  res.send('\uFEFF' + rows.map((row) => row.map(L.csvCell).join(',')).join('\r\n'));
+});
 
 router.get('/', (req, res) => {
   const s = scopeSql(req.user);
@@ -46,6 +82,8 @@ function validate(b, id) {
   if (!name) return 'Vui lòng nhập họ tên';
   if (!code) return 'Vui lòng nhập mã nhân viên';
   if (!EMAIL_RE.test(email)) return 'Email không hợp lệ';
+  if (!validPhone(b.phone)) return 'Số điện thoại không hợp lệ (7–15 chữ số)';
+  if (b.start_date && !L.validDate(String(b.start_date))) return 'Ngày vào làm không hợp lệ';
   if (b.status && !STATUSES.includes(b.status)) return 'Trạng thái không hợp lệ';
   if (db.prepare('SELECT 1 FROM employees WHERE (email = ? OR code = ?) AND id != ?').get(email, code, id || 0)) return 'Mã hoặc email bị trùng';
   if (b.department_id && !db.prepare('SELECT 1 FROM departments WHERE id = ?').get(b.department_id)) return 'Phòng ban không tồn tại';
@@ -91,6 +129,7 @@ router.put('/:id', (req, res) => {
   } else if (cur.email === req.user.email) {
     // Nhân viên / quản lý chỉ được sửa số điện thoại của chính mình
     const phone = String(req.body.phone || '');
+    if (!validPhone(phone)) return res.status(400).json({ error: 'Số điện thoại không hợp lệ (7–15 chữ số)' });
     db.prepare('UPDATE employees SET phone = ? WHERE id = ?').run(String(req.body.phone || ''), cur.id);
     recordHistory(cur, req.user, 'employee', cur.phone !== phone
       ? { 'Số điện thoại': { old: cur.phone, new: phone } } : {});

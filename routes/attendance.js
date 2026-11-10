@@ -15,11 +15,47 @@ router.get('/today', (req, res) => {
   res.json({ employee: true, date: L.today(), check_in: a ? a.check_in : null, check_out: a ? a.check_out : null });
 });
 
+router.get('/export', (req, res) => {
+  const month = String(req.query.month || L.curMonth());
+  if (!L.validMonth(month)) return res.status(400).json({ error: 'Tháng không hợp lệ (YYYY-MM)' });
+  const scope = L.scopeSql(req.user);
+  let sql = `SELECT e.*, d.name AS department FROM employees e
+    LEFT JOIN departments d ON d.id = e.department_id WHERE 1=1${scope.sql}`;
+  const args = [...scope.args];
+  if (req.query.department_id) {
+    const departmentId = Number(req.query.department_id);
+    if (!Number.isInteger(departmentId) || !db.prepare('SELECT 1 FROM departments WHERE id = ?').get(departmentId)) {
+      return res.status(400).json({ error: 'Phòng ban không hợp lệ' });
+    }
+    sql += ' AND e.department_id = ?';
+    args.push(departmentId);
+  }
+  const employees = db.prepare(sql + ' ORDER BY e.code').all(...args);
+  const rows = [['Mã nhân viên', 'Họ tên', 'Phòng ban', 'Ngày', 'Giờ vào', 'Giờ ra', 'Số giờ', 'Trạng thái', 'Ghi chú']];
+  const settings = L.getSettings();
+  employees.forEach((employee) => {
+    L.summarize(employee, month, settings).days.forEach((day) => {
+      rows.push([
+        employee.code, employee.name, employee.department, day.date, day.check_in, day.check_out,
+        day.hours == null ? '' : day.hours.toFixed(2), day.status, day.note,
+      ]);
+    });
+  });
+  audit(req.user, `Xuất bảng chấm công ${month}: ${employees.length} nhân viên`);
+  res.set({
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="bang-cham-cong-${month}.csv"`,
+  });
+  res.send('\uFEFF' + rows.map((row) => row.map(L.csvCell).join(',')).join('\r\n'));
+});
+
 router.post('/check-in', (req, res) => {
   const e = L.meEmp(req.user);
   if (!e) return res.status(404).json({ error: 'Tài khoản chưa có hồ sơ nhân viên' });
   if (e.status === 'Nghỉ việc') return res.status(403).json({ error: 'Hồ sơ đã ở trạng thái nghỉ việc' });
   const d = L.today();
+  if (L.isPayrollLocked(d.slice(0, 7))) return res.status(409).json({ error: 'Kỳ lương tháng này đã chốt, không thể chấm công bổ sung' });
+  if (L.isOnApprovedFullDayLeave(e.id, d)) return res.status(400).json({ error: 'Bạn đã được duyệt nghỉ cả ngày hôm nay, không thể check-in' });
   const cur = getAtt(e.id, d);
   if (cur && cur.check_in) return res.status(400).json({ error: `Hôm nay bạn đã check-in lúc ${cur.check_in}` });
   if (cur) db.prepare('UPDATE attendances SET check_in = ? WHERE id = ?').run(L.nowHM(), cur.id);
@@ -31,6 +67,8 @@ router.post('/check-in', (req, res) => {
 router.post('/check-out', (req, res) => {
   const e = L.meEmp(req.user);
   if (!e) return res.status(404).json({ error: 'Tài khoản chưa có hồ sơ nhân viên' });
+  const d = L.today();
+  if (L.isPayrollLocked(d.slice(0, 7))) return res.status(409).json({ error: 'Kỳ lương tháng này đã chốt, không thể sửa chấm công' });
   const cur = getAtt(e.id, L.today());
   if (!cur || !cur.check_in) return res.status(400).json({ error: 'Bạn chưa check-in hôm nay' });
   if (cur.check_out) return res.status(400).json({ error: `Bạn đã check-out lúc ${cur.check_out}. Cần sửa hãy liên hệ HR` });
@@ -45,7 +83,17 @@ router.get('/month', (req, res) => {
   if (!L.validMonth(month)) return res.status(400).json({ error: 'Tháng không hợp lệ (định dạng YYYY-MM)' });
   const st = L.getSettings();
   const s = L.scopeSql(req.user);
-  const emps = db.prepare(`SELECT e.*, d.name AS department FROM employees e LEFT JOIN departments d ON d.id = e.department_id WHERE 1=1${s.sql} ORDER BY e.code`).all(...s.args);
+  let sql = `SELECT e.*, d.name AS department FROM employees e LEFT JOIN departments d ON d.id = e.department_id WHERE 1=1${s.sql}`;
+  const args = [...s.args];
+  if (req.query.department_id) {
+    const departmentId = Number(req.query.department_id);
+    if (!Number.isInteger(departmentId) || !db.prepare('SELECT 1 FROM departments WHERE id = ?').get(departmentId)) {
+      return res.status(400).json({ error: 'Phòng ban không hợp lệ' });
+    }
+    sql += ' AND e.department_id = ?';
+    args.push(departmentId);
+  }
+  const emps = db.prepare(sql + ' ORDER BY e.code').all(...args);
   res.json(emps.map((e) => ({
     employee_id: e.id, code: e.code, name: e.name, department: e.department, status: e.status,
     ...L.summarize(e, month, st).summary,
@@ -68,6 +116,7 @@ router.put('/', need('admin', 'hr'), (req, res) => {
   const e = db.prepare('SELECT * FROM employees WHERE id = ?').get(b.employee_id);
   if (!e) return res.status(404).json({ error: 'Không tìm thấy nhân viên' });
   if (!L.validDate(b.date)) return res.status(400).json({ error: 'Ngày không hợp lệ' });
+  if (L.isPayrollLocked(b.date.slice(0, 7))) return res.status(409).json({ error: `Kỳ lương tháng ${b.date.slice(0, 7)} đã chốt, không thể sửa chấm công` });
   const ci = String(b.check_in || '').trim(), co = String(b.check_out || '').trim();
   if (ci && !L.validTime(ci)) return res.status(400).json({ error: 'Giờ vào không hợp lệ (HH:MM)' });
   if (co && !L.validTime(co)) return res.status(400).json({ error: 'Giờ ra không hợp lệ (HH:MM)' });
@@ -109,8 +158,9 @@ router.post('/import', need('admin', 'hr'), (req, res) => {
       const e = db.prepare('SELECT id FROM employees WHERE code = ?').get(code || '');
       if (!e) return errors.push(`Dòng ${i + 1}: không có mã nhân viên "${code}"`);
       if (!L.validDate(date)) return errors.push(`Dòng ${i + 1}: ngày không hợp lệ`);
+      if (L.isPayrollLocked(date.slice(0, 7))) return errors.push(`Dòng ${i + 1}: kỳ lương tháng ${date.slice(0, 7)} đã chốt`);
       if (!ci) return errors.push(`Dòng ${i + 1}: thiếu hoặc sai giờ vào`);
-      if (co0 && !co) return errors.push(`Dòng ${i + 1}: giờ ra không hợp lệ`);
+      if (!L.validTime(ci) || (co && !L.validTime(co)) || (co0 && !co)) return errors.push(`Dòng ${i + 1}: giờ vào/ra không hợp lệ`);
       if (co && co < ci) return errors.push(`Dòng ${i + 1}: giờ ra trước giờ vào`);
       up.run(e.id, date, ci, co || null);
       imported++;

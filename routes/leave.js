@@ -2,6 +2,7 @@ const router = require('express').Router();
 const { db, audit, notifyUser } = require('../db');
 const { auth } = require('../middleware');
 const L = require('../lib');
+const { notifyWorkflowEmail } = require('../mailer');
 
 router.use(auth);
 
@@ -28,8 +29,11 @@ function canCancel(u, r) {
 const hasManager = (emp) => !!emp.department_id && !!db.prepare(
   "SELECT 1 FROM users u JOIN employees e ON e.email = u.email WHERE u.role = 'manager' AND e.department_id = ? AND e.id != ?",
 ).get(emp.department_id, emp.id);
-const notifyHr = (title, message) => db.prepare("SELECT id FROM users WHERE role IN ('admin','hr')").all()
-  .forEach((user) => notifyUser(user.id, title, message, '/leave'));
+const notifyHr = (title, message) => {
+  const users = db.prepare("SELECT id, email FROM users WHERE role IN ('admin','hr')").all();
+  users.forEach((user) => notifyUser(user.id, title, message, '/leave'));
+  notifyWorkflowEmail(users.map((user) => user.email), title, `${message}\nĐăng nhập hệ thống để xử lý đơn nghỉ.`);
+};
 
 function balance(empId, year) {
   const st = L.getSettings();
@@ -69,7 +73,9 @@ router.post('/', (req, res) => {
   const from = String(b.from_date || ''), to = String(b.to_date || b.from_date || '');
   if (!L.validDate(from) || !L.validDate(to)) return res.status(400).json({ error: 'Ngày nghỉ không hợp lệ' });
   if (to < from) return res.status(400).json({ error: 'Ngày kết thúc phải sau hoặc bằng ngày bắt đầu' });
+  if (b.half && from !== to) return res.status(400).json({ error: 'Nghỉ nửa ngày chỉ áp dụng cho một ngày' });
   if (from.slice(0, 4) !== to.slice(0, 4)) return res.status(400).json({ error: 'Đơn nghỉ không được vắt qua năm, vui lòng tách thành hai đơn' });
+  if (L.hasLockedPayrollInRange(from, to)) return res.status(409).json({ error: 'Khoảng nghỉ có ngày thuộc kỳ lương đã chốt, không thể tạo hoặc thay đổi đơn' });
   if (to > L.fmtDate(new Date(new Date().getFullYear() + 1, 11, 31))) return res.status(400).json({ error: 'Ngày nghỉ quá xa' });
   const half = b.half && from === to ? 1 : 0;
   const st = L.getSettings();
@@ -87,10 +93,12 @@ router.post('/', (req, res) => {
     .run(e.id, type.id, from, to, half, days, String(b.reason || '').slice(0, 500), status);
   audit(req.user, `Tạo đơn nghỉ #${info.lastInsertRowid} (${type.name}, ${from} → ${to}, ${days} ngày)`);
   if (status === 'Chờ quản lý') {
-    db.prepare(`SELECT u.id FROM users u JOIN employees manager ON manager.email = u.email
+    const managers = db.prepare(`SELECT u.id, u.email FROM users u JOIN employees manager ON manager.email = u.email
       WHERE u.role = 'manager' AND manager.department_id = ? AND manager.id != ?`)
-      .all(e.department_id, e.id)
-      .forEach((user) => notifyUser(user.id, 'Đơn nghỉ cần duyệt', `${e.name} gửi đơn ${type.name} từ ${from} đến ${to}.`, '/leave'));
+      .all(e.department_id, e.id);
+    const message = `${e.name} gửi đơn ${type.name} từ ${from} đến ${to}.`;
+    managers.forEach((user) => notifyUser(user.id, 'Đơn nghỉ cần duyệt', message, '/leave'));
+    notifyWorkflowEmail(managers.map((user) => user.email), 'Đơn nghỉ cần duyệt', `${message}\nĐăng nhập hệ thống để xử lý đơn nghỉ.`);
   } else notifyHr('Đơn nghỉ cần xử lý', `${e.name} gửi đơn ${type.name} từ ${from} đến ${to}.`);
   res.status(201).json({ id: info.lastInsertRowid, status, days });
 });
@@ -101,10 +109,11 @@ router.put('/:id/decide', (req, res) => {
   const r = find(req.params.id);
   if (!r) return res.status(404).json({ error: 'Không tìm thấy đơn' });
   if (!canDecide(req.user, r)) return res.status(403).json({ error: 'Bạn không có quyền xử lý đơn này ở bước hiện tại' });
-  const note = String(req.body.note || '').slice(0, 300);
+  if (L.hasLockedPayrollInRange(r.from_date, r.to_date)) return res.status(409).json({ error: 'Đơn có ngày thuộc kỳ lương đã chốt, không thể duyệt hoặc từ chối' });
+  const note = String((req.body || {}).note || '').slice(0, 300);
   let status;
-  if (req.body.action === 'reject') status = 'Từ chối';
-  else if (req.body.action === 'approve') status = r.status === 'Chờ quản lý' && !L.isHr(req.user) ? 'Chờ HR' : 'Đã duyệt';
+  if (req.body && req.body.action === 'reject') status = 'Từ chối';
+  else if (req.body && req.body.action === 'approve') status = r.status === 'Chờ quản lý' && !L.isHr(req.user) ? 'Chờ HR' : 'Đã duyệt';
   else return res.status(400).json({ error: 'Hành động không hợp lệ' });
   db.prepare('UPDATE leave_requests SET status = ?, manager_note = ?, decided_by = ? WHERE id = ?').run(status, note, req.user.email, r.id);
   audit(req.user, `Đơn nghỉ #${r.id} của ${r.code}: ${r.status} → ${status}`);
@@ -113,7 +122,9 @@ router.put('/:id/decide', (req, res) => {
     notifyHr('Đơn nghỉ cần HR xác nhận', `${r.name}: ${r.type}, ${r.from_date} đến ${r.to_date} đã được quản lý duyệt.`);
     if (owner) notifyUser(owner.id, 'Đơn nghỉ đã qua bước quản lý', `Đơn nghỉ ${r.from_date} đến ${r.to_date} đang chờ HR xác nhận.`, '/leave');
   } else if (owner) {
-    notifyUser(owner.id, `Đơn nghỉ ${status.toLowerCase()}`, `${r.type}, ${r.from_date} đến ${r.to_date}${note ? ` · ${note}` : ''}`, '/leave');
+    const message = `${r.type}, ${r.from_date} đến ${r.to_date}${note ? ` · ${note}` : ''}`;
+    notifyUser(owner.id, `Đơn nghỉ ${status.toLowerCase()}`, message, '/leave');
+    notifyWorkflowEmail([r.email], `Đơn nghỉ ${status.toLowerCase()}`, `${message}\nĐăng nhập hệ thống để xem kết quả.`);
   }
   res.json({ ok: true, status });
 });
@@ -122,6 +133,7 @@ router.put('/:id/cancel', (req, res) => {
   const r = find(req.params.id);
   if (!r) return res.status(404).json({ error: 'Không tìm thấy đơn' });
   if (!canCancel(req.user, r)) return res.status(403).json({ error: 'Không thể hủy đơn này' });
+  if (L.hasLockedPayrollInRange(r.from_date, r.to_date)) return res.status(409).json({ error: 'Đơn có ngày thuộc kỳ lương đã chốt, không thể hủy' });
   db.prepare("UPDATE leave_requests SET status = 'Đã hủy', decided_by = ? WHERE id = ?").run(req.user.email, r.id);
   audit(req.user, `Hủy đơn nghỉ #${r.id} của ${r.code}`);
   if (L.isHr(req.user) && r.email !== req.user.email) {
