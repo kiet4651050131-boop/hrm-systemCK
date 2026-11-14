@@ -6,16 +6,27 @@ for (const key of ['SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'SMTP_P
 }
 const assert = require('assert');
 const net = require('node:net');
-const app = require('./server');
+const { createApp } = require('./dist/app');
 const L = require('./lib');
 
 (async () => {
-  const srv = app.listen(0);
+  const nestApp = await createApp();
+  await nestApp.listen(0);
+  const srv = nestApp.getHttpServer();
   const base = `http://127.0.0.1:${srv.address().port}/api`;
   const call = async (m, p, b, t) => {
     const r = await fetch(base + p, { method: m, headers: { 'Content-Type': 'application/json', ...(t ? { Authorization: 'Bearer ' + t } : {}) }, body: b ? JSON.stringify(b) : undefined });
     return { s: r.status, d: await r.json().catch(() => ({})) };
   };
+  let n = 0; const ok = (c, m) => { assert(c, m); n++; };
+  const page = await fetch(`http://127.0.0.1:${srv.address().port}/`);
+  ok(page.status === 200 && page.headers.get('content-type').includes('text/html'), 'NestJS host serves frontend');
+  const invalidJson = await fetch(base + '/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{',
+  });
+  ok(invalidJson.status === 400, 'invalid JSON stays a 400 response');
   const login = async (e) => {
     const result = await call('POST', '/auth/login', { email: e, password: 'secret1234' });
     if (result.d.user.must_change_password) {
@@ -23,7 +34,6 @@ const L = require('./lib');
     }
     return result.d.token;
   };
-  let n = 0; const ok = (c, m) => { assert(c, m); n++; };
   ok(L.csvCell('=1+1') === "'=1+1", 'CSV escape cong thuc spreadsheet');
 
   // Dang ky tu do chi mo cho tai khoan Admin dau tien; sau do Admin/HR tao tai khoan
@@ -35,6 +45,7 @@ const L = require('./lib');
   ok((await call('GET', '/auth/status')).d.registrationOpen === false, 'da co tai khoan: dong dang ky');
   ok((await call('POST', '/auth/register', { name: 'An', email: 'an@cty.vn', password: 'secret1234' })).s === 403, 'dang ky tu do da dong');
   const A = await login('admin@cty.vn');
+  ok((await call('GET', '/missing', null, A)).s === 404, 'unknown API stays a JSON 404');
 
   // Admin / HR tao tai khoan
   const mk = (b, t = A) => call('POST', '/users', { password: 'secret1234', ...b }, t);
@@ -438,5 +449,5 @@ const L = require('./lib');
   // Nhat ky
   ok((await call('GET', '/logs', null, A)).d.length > 10, 'co nhat ky');
   console.log(`OK: ${n} kiem tra dat`);
-  srv.close();
+  await nestApp.close();
 })().catch((e) => { console.error('FAIL:', e.message); process.exit(1); });

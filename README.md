@@ -1,13 +1,15 @@
 # HRM – Hệ thống quản lý nhân sự (Node.js)
 
-Node.js + Express + SQLite (node:sqlite có sẵn, không cần biên dịch) + JWT + bcrypt. Giao diện web nằm trong `public/`.
+Backend: Node.js + NestJS (Express adapter) + TypeScript + SQLite (`node:sqlite`) + JWT + `bcryptjs`. Giao diện HTML/CSS/JavaScript hiện có nằm trong `public/`.
+
+Các API hiện được duy trì qua lớp tương thích Express để bảo toàn hành vi trong giai đoạn chuyển đổi; các phân hệ sẽ được chuyển dần sang NestJS controllers/services. Đây là giai đoạn Modular Monolith, chưa phải SOA hoàn chỉnh.
 
 ## Chạy thử (5 phút)
 
 ```bash
 npm install
 cp .env.example .env        # rồi điền JWT_SECRET (xem hướng dẫn trong file)
-npm start                   # http://localhost:3000
+npm start                   # tự biên dịch TypeScript, rồi chạy http://localhost:3000
 npm test                    # chạy bộ kiểm thử API 
 ```
 
@@ -66,7 +68,7 @@ Lần chạy đầu tiên, màn hình đăng nhập có nút tạo **tài khoả
 ## Triển khai thật
 1. Đặt `NODE_ENV=production` và `JWT_SECRET` dài ngẫu nhiên (server từ chối chạy nếu thiếu).
 2. **Bắt buộc chạy sau HTTPS** (Nginx/Caddy làm reverse proxy). Nếu dùng proxy, thêm `app.set('trust proxy', 1)` trong `server.js` để giới hạn đăng nhập tính đúng IP.
-3. Chạy bằng `pm2 start server.js` hoặc `docker build -t hrm . && docker run -d -p 3000:3000 -v hrm-data:/app/data --env-file .env hrm`.
+3. Chạy bằng `npm run build && pm2 start dist/main.js` hoặc `docker build -t hrm . && docker run -d -p 3000:3000 -v hrm-data:/app/data --env-file .env hrm`.
 4. **Sao lưu** thư mục `data/` hằng ngày (cron copy `data/hrm.db`), và thử khôi phục ít nhất một lần.
 
 ## Giới hạn hiện tại
